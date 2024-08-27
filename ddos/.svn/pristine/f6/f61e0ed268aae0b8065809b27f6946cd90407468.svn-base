@@ -1,0 +1,79 @@
+package edu.cust.ccsds;
+
+import org.savarese.vserv.ipq.IPQHandle;
+import org.savarese.vserv.ipq.NetfilterPacket;
+import org.savarese.vserv.ipq.NetlinkMessage;
+import org.savarese.vserv.tcpip.IPPacket;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import edu.cust.util.IPUtil;
+
+public class OutputMonitor extends IPQHandle implements Runnable {
+	private Logger log = LoggerFactory.getLogger("CCSDS_O_Monitor");
+
+	
+
+	StringBuffer buffer = new StringBuffer();
+
+	void printError() {
+		buffer.setLength(0);
+		buffer.append("Error: ");
+		getErrorMessage(buffer);
+		log.warn(buffer.toString());
+	}
+
+	@Override
+	public void run() {
+		// TODO Auto-generated method stub
+		try {
+			NetlinkMessage msg = new NetlinkMessage(4096);
+			int status = -1;
+
+			boolean open = open(IPQHandle.PF_INET, 1);
+			log.info("open: {}", open);
+			if (open)
+				status = setMode(IPQHandle.MODE_COPY_PACKET, msg.getMaxLength());
+
+			if (status >= 0) {
+				while (true) {
+					status = read(msg, 0);
+
+					if (status < 0) {
+						printError();
+						break;
+					}
+				}
+			} else
+				printError();
+		} finally {
+			buffer.setLength(0);
+			close();
+		}
+	}
+
+	@Override
+	protected void callback(NetfilterPacket packet) {
+		// TODO Auto-generated method stub
+		byte[] data = new byte[2048];
+		IPPacket ipPacket = new IPPacket(1);
+		int payloadLen = packet.getPacketData(data);
+		
+		ipPacket.setData(data);
+		
+		int len = ipPacket.getIPPacketLength();
+		int headLen = ipPacket.getIPHeaderByteLength();
+		byte[] ndata = new byte[headLen + len];
+		System.arraycopy(data, 0, ndata, 0, headLen);
+		System.arraycopy(data, 0, ndata, headLen, len);
+		ipPacket.setData(ndata);
+		ipPacket.setIPPacketLength(ndata.length);
+		ipPacket.computeIPChecksum(true);
+		
+		int destIp = ipPacket.getDestinationAsWord();
+		log.info("len: {}, payloadLen: {}, dest: {}", len, payloadLen, IPUtil.longToString(destIp));
+		
+		reinject(packet, IPQHandle.VERDICT_ACCEPT);
+	}
+
+}

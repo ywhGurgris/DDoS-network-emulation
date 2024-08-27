@@ -1,0 +1,15 @@
+server.servlet.context-path=/ns
+
+#spring.mvc.view.prefix=/
+#spring.mvc.view.suffix=.jsp
+
+#env.svn-file-root=d:/home/photos/
+
+env.czml-root=/home/ubuntu/network/czml
+#env.czml-root=D:/home/ubuntu/network/czml
+
+logging.level.edu.cust=DEBUG
+logging.level.org.springframework=WARN
+
+spring.servlet.multipart.max-file-size=3MB
+spring.jmx.enabled=false

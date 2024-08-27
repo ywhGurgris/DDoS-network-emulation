@@ -1,0 +1,151 @@
+package edu.cust.target;
+
+import java.util.ArrayList;
+import java.util.LinkedList;
+import java.util.List;
+
+import org.apache.http.Consts;
+import org.apache.http.HttpEntity;
+import org.apache.http.NameValuePair;
+import org.apache.http.client.entity.UrlEncodedFormEntity;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.message.BasicNameValuePair;
+import org.apache.http.util.EntityUtils;
+
+import oshi.SystemInfo;
+import oshi.hardware.CentralProcessor;
+import oshi.hardware.GlobalMemory;
+import oshi.hardware.HardwareAbstractionLayer;
+import oshi.hardware.NetworkIF;
+
+public class StatisticsThread extends Thread{
+	
+	private String serverIp;
+	
+	private String localIp;
+	
+	private String serverPort;
+	
+	private LinkedList<String> backlogQueue;
+	
+	public StatisticsThread(String serverIp, String serverPort, String localIp, LinkedList<String> backlogQueue) {
+		this.serverIp = serverIp;
+		this.serverPort = serverPort;
+		this.localIp = localIp;
+		this.backlogQueue = backlogQueue;
+	}
+	
+	void sleep() {
+		try {
+			Thread.sleep(500);
+		}catch(Exception ex) {
+			ex.printStackTrace();
+		}
+	}
+	
+	String cpuInfo(CentralProcessor processor) {
+		return String.format("%.1f", processor.getSystemCpuLoadBetweenTicks() * 100);
+	}
+	
+	static final double GB = 1000 * 1000 * 1000;
+	
+	String memInfo(GlobalMemory memory) {
+		return String.format("%.2f", (memory.getTotal() - memory.getAvailable()) / GB);
+	}
+	
+	long lastRecv = -1;
+	long lastSend = -1;
+	
+	String[] netInfo(NetworkIF[] ifs, String localIp) {
+		for (NetworkIF nif : ifs) {
+    		String[] ips = nif.getIPv4addr();
+			String ip = ips != null && ips.length > 0 ? ips[0] : "";
+			if(localIp.equals(ip)) {
+				nif.updateNetworkStats();
+				long totalRecv = nif.getPacketsRecv();
+				long totalSend = nif.getPacketsSent();
+				long currentRecv = lastRecv == -1 ? 0 : totalRecv - lastRecv;
+				long currentSend = lastSend == -1 ? 0 : totalSend - lastSend;
+				lastRecv = totalRecv;
+				lastSend = totalSend;
+				return new String[] {currentRecv + "", currentSend + ""};
+			}
+		}
+		return new String[]{"0", "0"};
+	}
+	
+//	String backlogInfo() {
+//		try {
+//			Process process  =  Runtime.getRuntime().exec("netstat -n");
+//			int n = 0;
+//			try(BufferedReader in = new BufferedReader(new InputStreamReader(process.getInputStream()))){
+//				String line;
+//				while((line = in.readLine()) != null) {
+//					if(line.startsWith("tcp") && line.trim().endsWith("SYN_RECV")) {
+//						n++;
+//					}
+//				}
+//			}
+//			process.destroy();
+//			return n + "";
+//		}catch(Exception ex) {
+//			ex.printStackTrace();
+//		}
+//		return "0";
+//	}
+
+	@Override
+	public void run() {
+		// TODO Auto-generated method stub
+		SystemInfo si = new SystemInfo();
+		HardwareAbstractionLayer hal = si.getHardware();
+		String backlog = "0";
+		CloseableHttpClient client = HttpClients.createDefault();
+		while(true) {
+			String cpu = cpuInfo(hal.getProcessor());
+//			System.out.println("cpu");
+			String mem = memInfo(hal.getMemory());
+//			System.out.println("memory");
+			String[] net = netInfo(hal.getNetworkIFs(), localIp);
+//			System.out.println("network");
+			synchronized(backlogQueue) {
+				if(!backlogQueue.isEmpty()) {
+					backlog = backlogQueue.getLast();
+					backlogQueue.clear();
+				}
+			}
+//			System.out.println("backlog");
+//			String backlog = backlogInfo();
+//			System.out.println(net);
+			
+			HttpPost post = new HttpPost(String.format("http://%s:%s/ddos/adm/receiveDdosTargetStateAjax", serverIp, serverPort));
+			List<NameValuePair> params = new ArrayList<NameValuePair>();
+			params.add(new BasicNameValuePair("cpu", cpu));
+			params.add(new BasicNameValuePair("memory", mem));
+			params.add(new BasicNameValuePair("recv", net[0]));
+			params.add(new BasicNameValuePair("send", net[1]));
+			params.add(new BasicNameValuePair("backlog", backlog));
+			try {
+				UrlEncodedFormEntity entity = new UrlEncodedFormEntity(params, Consts.UTF_8);
+				entity.setContentType("application/x-www-form-urlencoded");
+				post.setEntity(entity);
+				try(CloseableHttpResponse httpResponse = client.execute(post)){
+					if (httpResponse.getStatusLine().getStatusCode() == 200) {
+						HttpEntity httpEntity = httpResponse.getEntity();
+						String result = EntityUtils.toString(httpEntity);// 取出应答字符串
+						System.out.println(String.format("Successfully notified: %s", result));
+					}
+//					post.releaseConnection();
+				}
+			} catch (Exception ex) {
+				ex.printStackTrace();
+			}
+			sleep();
+		}
+		
+	}
+
+}

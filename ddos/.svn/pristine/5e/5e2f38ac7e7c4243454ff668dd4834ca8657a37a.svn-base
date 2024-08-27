@@ -1,0 +1,133 @@
+package edu.cust.target;
+
+import static com.savarese.rocksaw.net.RawSocket.getProtocolByName;
+
+import java.io.IOException;
+import java.net.InetAddress;
+
+import org.savarese.vserv.tcpip.TCPPacket;
+
+import com.savarese.rocksaw.net.RawSocket;
+
+import edu.cust.util.IPUtil;
+
+public class Test {
+	
+	static TestMonitor tm = new TestMonitor();
+	
+	static void sendSynPacket(String ippDest, String ippSrc) {
+		try {
+			int ippIndex = ippDest.indexOf(':');
+			String destAddr = ippDest.substring(0, ippIndex++);
+			int destPort = Integer.parseInt(ippDest.substring(ippIndex));
+			ippIndex = ippSrc.indexOf(':');
+			String srcAddr = ippSrc.substring(0, ippIndex++);
+			int srcPort = Integer.parseInt(ippSrc.substring(ippIndex));
+			RawSocket socket = new RawSocket();
+			socket.open(RawSocket.PF_INET, getProtocolByName("tcp"));
+			socket.setIPHeaderInclude(true);
+			TCPPacket tcp = new TCPPacket(1);
+			byte[] data = new byte[100];
+			tcp.setData(data);
+			tcp.setIPVersion(4);
+			tcp.setSourceAsWord((int)IPUtil.stringToLong(srcAddr));
+			tcp.setDestinationAsWord((int)IPUtil.stringToLong(destAddr));
+			tcp.setIPFlags(2);
+			tcp.setTTL(64);
+			tcp.setIPHeaderLength(5);
+			tcp.setIPPacketLength(40);
+			tcp.setProtocol(TCPPacket.PROTOCOL_TCP);
+			tcp.computeIPChecksum();
+
+			tcp.setSourcePort(srcPort);
+			tcp.setDestinationPort(destPort);
+			tcp.setControlFlags(TCPPacket.MASK_SYN);
+			tcp.setSequenceNumber(100);
+			tcp.setWindowSize(64240);
+			tcp.setTCPHeaderLength(5);
+			tcp.computeTCPChecksum();
+			int length = tcp.getIPPacketLength();
+			socket.write(InetAddress.getByName(destAddr), data, 0, length);
+			socket.close();
+		} catch (IOException ex) {
+			ex.printStackTrace();
+		}
+	}
+	
+	static void sendRstPacket(String ippDest, String ippSrc) {
+		try {
+			int ippIndex = ippDest.indexOf(':');
+			String destAddr = ippDest.substring(0, ippIndex++);
+			int destPort = Integer.parseInt(ippDest.substring(ippIndex));
+			ippIndex = ippSrc.indexOf(':');
+			String srcAddr = ippSrc.substring(0, ippIndex++);
+			int srcPort = Integer.parseInt(ippSrc.substring(ippIndex));
+			RawSocket socket = new RawSocket();
+			socket.open(RawSocket.PF_INET, getProtocolByName("tcp"));
+			socket.setIPHeaderInclude(true);
+			TCPPacket tcp = new TCPPacket(1);
+			byte[] data = new byte[100];
+			tcp.setData(data);
+			tcp.setIPVersion(4);
+			tcp.setSourceAsWord((int)IPUtil.stringToLong(srcAddr));
+			tcp.setDestinationAsWord((int)IPUtil.stringToLong(destAddr));
+			tcp.setIPFlags(2);
+			tcp.setTTL(64);
+			tcp.setIPHeaderLength(5);
+			tcp.setIPPacketLength(40);
+			tcp.setProtocol(TCPPacket.PROTOCOL_TCP);
+			tcp.computeIPChecksum();
+
+			tcp.setSourcePort(srcPort);
+			tcp.setDestinationPort(destPort);
+			tcp.setControlFlags(TCPPacket.MASK_RST);
+			tcp.setSequenceNumber(101);
+			tcp.setWindowSize(64240);
+			tcp.setTCPHeaderLength(5);
+			tcp.computeTCPChecksum();
+			int length = tcp.getIPPacketLength();
+			socket.write(InetAddress.getByName(destAddr), data, 0, length);
+			socket.close();
+		} catch (IOException ex) {
+			ex.printStackTrace();
+		}
+	}
+
+	public static void main(String[] args) {
+		// TODO Auto-generated method stub
+		int n = args.length;
+		if(n != 3) {
+			System.out.println("必须输入3个参数，目的IP:目的端口，源IP:源端口，SYN或RST");
+			return;
+		}
+		if("syn".equalsIgnoreCase(args[2])) {
+			new Thread(tm).start();
+		}
+		try {
+			Thread.sleep(2000);
+		}catch(Exception ex) {
+			ex.printStackTrace();
+		}
+		if("syn".equalsIgnoreCase(args[2])) {
+			sendSynPacket(args[0], args[1]);
+		}else {
+			sendRstPacket(args[0], args[1]);
+		}
+		
+//		try {
+//			Thread.sleep(Long.parseLong(args[2]) * 1000);
+//		}catch(Exception ex) {
+//			ex.printStackTrace();
+//		}
+		
+//		synchronized (tm.queue) {
+//			for (Map.Entry<long[],Long> e : tm.queue.entrySet()) {
+//				System.out.println("sn: " + e.getValue());
+//				sendRstPacket(args[0], args[1], e.getValue() + 1);
+//			}
+//			tm.queue.clear();
+//		}
+		System.out.println("end");
+	}
+
+}

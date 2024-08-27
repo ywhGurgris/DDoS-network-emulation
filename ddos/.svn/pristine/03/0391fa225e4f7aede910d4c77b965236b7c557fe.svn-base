@@ -1,0 +1,304 @@
+package edu.cust.blackhole;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.jboss.netty.buffer.ChannelBuffer;
+import org.jboss.netty.buffer.ChannelBuffers;
+import org.onosproject.ospf.controller.OspfLsa;
+import org.onosproject.ospf.controller.OspfMessage;
+import org.onosproject.ospf.protocol.lsa.subtypes.OspfLsaLink;
+import org.onosproject.ospf.protocol.lsa.types.RouterLsa;
+import org.onosproject.ospf.protocol.ospfpacket.OspfMessageReader;
+import org.onosproject.ospf.protocol.ospfpacket.types.LsUpdate;
+import org.onosproject.ospf.protocol.util.ChecksumCalculator;
+import org.onosproject.ospf.protocol.util.OspfUtil;
+import org.savarese.vserv.ipq.IPQHandle;
+import org.savarese.vserv.ipq.NetfilterPacket;
+import org.savarese.vserv.ipq.NetlinkMessage;
+import org.savarese.vserv.tcpip.IPPacket;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import edu.cust.util.IPUtil;
+
+public class OspfMonitor extends IPQHandle implements Runnable {
+
+	private Logger log = LoggerFactory.getLogger("OSPF_Monitor");
+
+	private Map<Integer, DropCountQueue> queueArr;
+
+	private Map<String, Addr> addrMap = new ConcurrentHashMap<>();
+	
+	private List<Integer> attackers = new ArrayList<>();
+
+	private int localIp;
+	private String dev;
+	private int tunNum;
+
+	public OspfMonitor(Map<Integer, DropCountQueue> queueArr, String localIp, String dev) {
+		this.queueArr = queueArr;
+		this.localIp = (int) IPUtil.stringToLong(localIp);
+		this.dev = dev;
+	}
+
+	class Addr {
+		String netAddrString;
+		String addrString;
+		int netAddr;
+		int netMask;
+		Process xtun;
+		String tunName;
+
+		Addr(String addr) {
+			final int idx = addr.indexOf('/');
+			String ip = addr;
+			//int net;
+			if (idx != -1) {
+				ip = addr.substring(0, idx);
+				final int c = Integer.parseInt(addr.substring(idx + 1));
+				char[] buf = new char[32];
+				Arrays.fill(buf, '0');
+				for (int i = 0; i < c; i++) {
+					buf[i] = '1';
+				}
+				netMask = Long.valueOf(new String(buf), 2).intValue();
+				netAddr = (int)IPUtil.stringToLong(ip) & netMask;
+				addrString = IPUtil.longToString(netAddr | (1 << (31 - c))) + "/" + c;
+				netAddrString = IPUtil.longToString(netAddr);
+			} else {
+				netMask = -1;
+				netAddr = (int)IPUtil.stringToLong(ip);
+				addrString = ip + "/32";
+				netAddrString = ip;
+			}
+			tunName = "tun" + (tunNum++);
+		}
+
+		boolean match(int ip) {
+			return (ip & netMask) == netAddr;
+		}
+
+		void delTun() {
+			try {
+				//xtun.destroy();
+				//xtun.waitFor();
+				Runtime.getRuntime().exec(String.format("ip addr del %s dev %s", addrString, dev));
+				//Runtime.getRuntime().exec(String.format("ip tuntap del dev %s mode tun", tunName));
+			} catch (Exception ex) {
+				ex.printStackTrace();
+			}
+		}
+
+		void addTun() {
+			log.info(addrString);
+			try {
+				Runtime.getRuntime().exec(String.format("ip addr add %s dev %s", addrString, dev));
+				//Process p = Runtime.getRuntime().exec(String.format("ip tuntap add dev %s mode tun", tunName));
+				//p.waitFor();
+				//xtun = Runtime.getRuntime().exec(String.format("./xtun %s %s", tunName, localPeerIp));
+				//Runtime.getRuntime().exec(String.format("ifconfig %s %s", tunName, addrString));
+			} catch (Exception ex) {
+				ex.printStackTrace();
+			}
+		}
+	}
+
+	StringBuffer buffer = new StringBuffer();
+
+	List<Addr> addrList = new ArrayList<>();
+	
+	public void updateAttackers(String ips) {
+		List<Integer> tmp = new ArrayList<>();
+		String[] arr = ips.split("[,; |]+");
+		for (String ip : arr) {
+			if (!ip.equals("")) {
+				log.info("add attacker's ip: {}", ip);
+				tmp.add((int)IPUtil.stringToLong(ip));
+			}
+		}
+		attackers = tmp;
+	}
+
+	public void updateAddrList(String ips) {
+		List<Addr> tmp = new ArrayList<>();
+		HashMap<String, Addr> tmpMap = new HashMap<>();
+		String[] arr = ips.split("[,; |]+");
+		for (String ip : arr) {
+			if (!ip.equals("")) {
+				log.info("add ip: {}", ip);
+				Addr addr = new Addr(ip);
+				tmp.add(addr);
+				tmpMap.put(addr.netAddrString, addr);
+			}
+		}
+		List<String> delKeys = new ArrayList<>();
+		for (Addr addr : addrMap.values()) {
+			Addr ta = tmpMap.remove(addr.netAddrString);
+			if (ta == null) {
+				delKeys.add(addr.netAddrString);
+			}
+		}
+		for (String key : delKeys) {
+			Addr addr = addrMap.remove(key);
+			addr.delTun();
+		}
+		for (Addr addr : tmpMap.values()) {
+			addrMap.put(addr.netAddrString, addr);
+			addr.addTun();
+		}
+		addrList = tmp;
+	}
+
+	void printError() {
+		buffer.setLength(0);
+		buffer.append("Error: ");
+		getErrorMessage(buffer);
+		log.warn("{}", buffer);
+	}
+
+	@Override
+	public void run() {
+		// TODO Auto-generated method stub
+		try {
+			NetlinkMessage msg = new NetlinkMessage(4096);
+			int status = -1;
+
+			boolean open = open(IPQHandle.PF_INET, 0);
+			log.info("open: {}", open);
+			if (open)
+				status = setMode(IPQHandle.MODE_COPY_PACKET, msg.getMaxLength());
+
+			if (status >= 0) {
+				while (true) {
+					status = read(msg, 0);
+
+					if (status < 0) {
+						printError();
+						break;
+					}
+				}
+			} else
+				printError();
+		} finally {
+			buffer.setLength(0);
+			close();
+		}
+	}
+	
+	private ChecksumCalculator checksumCalculator = new ChecksumCalculator();
+
+	@Override
+	protected void callback(NetfilterPacket packet) {
+		// TODO Auto-generated method stub
+		byte[] data = new byte[2048];
+		IPPacket ospfPacket = new IPPacket(1);
+		packet.getPacketData(data);
+
+		ospfPacket.setData(data);
+
+		int destIp = ospfPacket.getDestinationAsWord();
+		for (Addr addr : addrList) {
+//			log.info("ip: {}, netMask: {}, netAddr: {}", destIp, addr.netMask, addr.netAddr);
+			if (addr.match(destIp)) {
+				int srcIp = ospfPacket.getSourceAsWord();
+				DropCountQueue q = queueArr.get(srcIp);
+				if (q == null) {
+					q = new DropCountQueue();
+					queueArr.put(srcIp, q);
+				}
+				q.plusOne();
+				try {
+					log.info("drop package from {} to {}", ospfPacket.getSourceAsInetAddress().getHostAddress(), ospfPacket.getDestinationAsInetAddress().getHostAddress());
+				}catch(Exception ex) {
+					ex.printStackTrace();
+				}
+				reinject(packet, IPQHandle.VERDICT_DROP);
+				return;
+			}
+		}
+		if (ospfPacket.getProtocol() == 89) {// OSPF
+			// printTCPPacket(tcpPacket);
+			int srcIp = ospfPacket.getSourceAsWord();
+			if(srcIp != localIp) {
+				int offset = ospfPacket.getIPHeaderByteLength() + 1;
+				for (int ip : attackers) {
+					if(srcIp == ip && data[offset] == 4) {
+						reinject(packet, IPQHandle.VERDICT_DROP);
+						return;
+					}
+				}
+				reinject(packet, IPQHandle.VERDICT_ACCEPT);
+				return;
+			}
+			final int offset = ospfPacket.getIPHeaderByteLength();
+			final int len = ospfPacket.getIPPacketLength() - offset;
+			ChannelBuffer channelBuffer = ChannelBuffers.copiedBuffer(data, offset, len);
+			OspfMessageReader ospfMessageReader = new OspfMessageReader();
+			try {
+				OspfMessage om = ospfMessageReader.readFromBuffer(channelBuffer);
+				log.info("{}", om);
+				if (om instanceof LsUpdate) {
+					boolean update = false;
+					LsUpdate lu = (LsUpdate) om;
+					log.info("lsu checksum is {}", lu.checksum());
+					for (Object obj : lu.getLsaList()) {
+						OspfLsa lsa = (OspfLsa) obj;
+						Object header = lsa.lsaHeader();
+						if (header instanceof RouterLsa) {
+							for (OspfLsaLink link : ((RouterLsa) header).routerLink()) {
+								log.info("link.id is {}", link.linkId);
+								if (addrMap.containsKey(link.linkId)) {
+									link.metric = 1;
+									byte[] cs = checksumCalculator.calculateLsaChecksum(((RouterLsa) header).asBytes(), 16, 17);
+									((RouterLsa)header).setLsCheckSum(((cs[0] & 0xff) << 8) + (cs[1] & 0xff));
+									update = true;
+									log.info("link.metric set 1, checksum is {}", ((RouterLsa)header).lsCheckSum());
+								}
+							}
+						}
+					}
+
+					if(update) {
+						byte[] ospfMessageAsByte = om.asBytes();
+						// Add the length and checksum in byte array at length position 2 & 3 and
+						// Checksum position
+						ospfMessageAsByte = OspfUtil.addLengthAndCheckSum(ospfMessageAsByte,
+								OspfUtil.OSPFPACKET_LENGTH_POS1, OspfUtil.OSPFPACKET_LENGTH_POS2,
+								OspfUtil.OSPFPACKET_CHECKSUM_POS1, OspfUtil.OSPFPACKET_CHECKSUM_POS2);
+						byte[] nb = new byte[offset + len];
+						System.arraycopy(data, 0, nb, 0, offset);
+						System.arraycopy(ospfMessageAsByte, 0, nb, offset, len);
+						ospfPacket.setData(nb);
+						ospfPacket.setIPPacketLength(nb.length);
+						ospfPacket.computeIPChecksum(true);
+						reinject(packet, IPQHandle.VERDICT_ACCEPT, nb.length, nb);
+						return;
+					}
+				}
+			} catch (Exception e) {
+				// TODO Auto-generated catch block
+				log.warn(e.getMessage(), e);
+			}
+//			int srcIp = ospfPacket.getSourceAsWord();
+//			int version = ospfPacket.getVersion();
+//			int type = ospfPacket.getType();
+//			int dataLen = ospfPacket.getOSPFDataByteLength();
+//			int packetLen = ospfPacket.getOSPFPacketLength();
+//			String rid = ospfPacket.getRouterIdString();
+//			String aid = ospfPacket.getAreaIdString();
+//			int checksum = ospfPacket.getOSPFChecksum();
+//			int checksum2 = ospfPacket.computeIPChecksum(false);
+//			System.out.printf("src: %s, dst: %s, v: %d, t: %d, dl: %d, pl: %d, rid: %s, aid: %s, cs: %d, cs2: %d\n",
+//					IPUtil.longToString(srcIp), IPUtil.longToString(destIp), version, type, dataLen, packetLen, rid,
+//					aid, checksum, checksum2);
+
+		}
+		reinject(packet, IPQHandle.VERDICT_ACCEPT);
+	}
+
+}

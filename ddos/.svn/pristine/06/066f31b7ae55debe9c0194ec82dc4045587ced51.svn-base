@@ -1,0 +1,199 @@
+package edu.cust.target;
+
+import static com.savarese.rocksaw.net.RawSocket.getProtocolByName;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.net.InetAddress;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map.Entry;
+
+import org.apache.http.Consts;
+import org.apache.http.HttpEntity;
+import org.apache.http.NameValuePair;
+import org.apache.http.client.entity.UrlEncodedFormEntity;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.message.BasicNameValuePair;
+import org.apache.http.util.EntityUtils;
+import org.savarese.vserv.tcpip.TCPPacket;
+
+import com.savarese.rocksaw.net.RawSocket;
+
+import edu.cust.util.IPUtil;
+
+public class ProtectThread extends Thread {
+
+//	private String localPort;
+
+	private HashMap<String, Long> queue = new HashMap<>();
+
+	private boolean protect;
+
+	private long backlogDuration;
+
+	private LinkedList<String> backlogQueue;
+	
+	private String serverIp;
+	private String serverPort;
+
+	public ProtectThread(String serverIp, String serverPort, LinkedList<String> backlogQueue) {
+		this.serverIp = serverIp;
+		this.serverPort = serverPort;
+		this.backlogQueue = backlogQueue;
+	}
+
+	public void on(long backlogDuration) {
+		protect = true;
+		this.backlogDuration = backlogDuration;
+	}
+
+	public void off() {
+		protect = false;
+	}
+
+	void sendRstPacket(RawSocket socket, String ippLocal, String ippRemote) {
+		try {
+			int ippIndex = ippLocal.indexOf(':');
+			String destAddr = ippLocal.substring(0, ippIndex++);
+			int destPort = Integer.parseInt(ippLocal.substring(ippIndex));
+			ippIndex = ippRemote.indexOf(':');
+			String srcAddr = ippRemote.substring(0, ippIndex++);
+			int srcPort = Integer.parseInt(ippRemote.substring(ippIndex));
+			
+			TCPPacket tcp = new TCPPacket(1);
+			byte[] data = new byte[100];
+			tcp.setData(data);
+			tcp.setIPVersion(4);
+			tcp.setSourceAsWord((int) IPUtil.stringToLong(srcAddr));
+			tcp.setDestinationAsWord((int) IPUtil.stringToLong(destAddr));
+			tcp.setIPFlags(2);
+			tcp.setTTL(64);
+			tcp.setIPHeaderLength(5);
+			tcp.setIPPacketLength(40);
+			tcp.setProtocol(TCPPacket.PROTOCOL_TCP);
+			tcp.computeIPChecksum();
+
+			tcp.setSourcePort(srcPort);
+			tcp.setDestinationPort(destPort);
+			tcp.setControlFlags(TCPPacket.MASK_RST);
+			tcp.setSequenceNumber(101);
+//			tcp.setWindowSize(64240);
+			tcp.setTCPHeaderLength(5);
+			tcp.computeTCPChecksum();
+			int length = tcp.getIPPacketLength();
+			socket.write(InetAddress.getByName(destAddr), data, 0, length);
+		} catch (IOException ex) {
+			ex.printStackTrace();
+		}
+	}
+
+	@Override
+	public void run() {
+		// TODO Auto-generated method stub
+//		String suffixPort = ":" + localPort;
+		while (true) {
+			try {
+				Process process = Runtime.getRuntime().exec("netstat -n");
+
+				Long time = System.currentTimeMillis();
+				try (BufferedReader in = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+					String line;
+					int n = 0;
+					RawSocket socket = new RawSocket();
+					socket.open(RawSocket.PF_INET, getProtocolByName("tcp"));
+					socket.setIPHeaderInclude(true);
+					long ct = -1;
+					while ((line = in.readLine()) != null) {
+						// System.out.println("----" + line + "----");
+						if (!line.startsWith("tcp") || !line.trim().endsWith("SYN_RECV")) {
+							continue;
+						}
+						n++;
+						String[] arr = line.split(" +");
+						String ippLocal = arr[3];
+						String ippRemote = arr[4];
+
+						if (protect) {
+							StringBuffer key = new StringBuffer();
+							key.append(ippLocal);
+							key.append(',');
+							key.append(ippRemote);
+							String ks = key.toString();
+							Long t = queue.get(ks);
+							if (t == null) {
+								queue.put(ks, time);
+							} else if (time - t > backlogDuration) {
+								if(ct == -1) {
+									ct = System.currentTimeMillis();
+								}
+								sendRstPacket(socket, ippLocal, ippRemote);
+								queue.remove(ks);
+							}
+						}
+
+					}
+					if(ct != -1) {
+						// 证明检测出攻击
+						sendBack(ct);
+					}
+					socket.close();
+					synchronized (backlogQueue) {
+						backlogQueue.add(n + "");
+					}
+					n = 0;
+					for (Iterator<Entry<String, Long>> i = queue.entrySet().iterator(); i.hasNext();) {
+						Entry<String, Long> e = i.next();
+
+						if (time - e.getValue() > backlogDuration) {
+							n++;
+							i.remove();
+						}
+					}
+					System.out.println("delete timeout data: " + n);
+				}
+
+				process.waitFor();
+				Thread.sleep(500);
+			} catch (Exception ex) {
+				ex.printStackTrace();
+			}
+		}
+	}
+	
+	void sendBack(long detectedTime) {
+		CloseableHttpClient client = HttpClients.createDefault();
+		HttpPost post = new HttpPost(String.format("http://%s:%s/ddos/adm/receiveDdosTargetProtectInfoAjax", serverIp, serverPort));
+		List<NameValuePair> params = new ArrayList<NameValuePair>();
+		params.add(new BasicNameValuePair("detectedTime", detectedTime + ""));
+		try {
+			UrlEncodedFormEntity entity = new UrlEncodedFormEntity(params, Consts.UTF_8);
+			entity.setContentType("application/x-www-form-urlencoded");
+			post.setEntity(entity);
+			try(CloseableHttpResponse httpResponse = client.execute(post)){
+				if (httpResponse.getStatusLine().getStatusCode() == 200) {
+					HttpEntity httpEntity = httpResponse.getEntity();
+					String result = EntityUtils.toString(httpEntity);// 取出应答字符串
+					System.out.println(String.format("Successfully notified: %s", result));
+				}
+//				post.releaseConnection();
+			}
+		} catch (Exception ex) {
+			ex.printStackTrace();
+		} finally {
+			try {
+				client.close();
+			}catch(IOException ex) {
+				ex.printStackTrace();
+			}
+		}
+	}
+
+}

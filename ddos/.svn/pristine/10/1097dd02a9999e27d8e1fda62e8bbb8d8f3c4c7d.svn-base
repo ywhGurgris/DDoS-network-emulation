@@ -1,0 +1,96 @@
+package edu.cust.target;
+
+import java.util.LinkedHashMap;
+
+import org.savarese.vserv.ipq.IPQHandle;
+import org.savarese.vserv.ipq.NetfilterPacket;
+import org.savarese.vserv.ipq.NetlinkMessage;
+import org.savarese.vserv.tcpip.TCPPacket;
+
+import edu.cust.util.IPUtil;
+
+public class TestMonitor extends IPQHandle implements Runnable {
+	
+	StringBuffer buffer = new StringBuffer();
+	LinkedHashMap<long[], Long> queue = new LinkedHashMap<>();
+	
+//	int sn;
+	
+//	public void setSn(int sn) {
+//		this.sn = sn;
+//	}
+
+	void printError() {
+		buffer.setLength(0);
+		buffer.append("Error: ");
+		getErrorMessage(buffer);
+		System.err.println(buffer.toString());
+	}
+
+	@Override
+	public void run() {
+		// TODO Auto-generated method stub
+		try {
+			NetlinkMessage msg = new NetlinkMessage(2048);
+			int status = -1;
+
+			boolean open = open(IPQHandle.PF_INET, 0);
+			System.out.println("open: " + open);
+			if (open)
+				status = setMode(IPQHandle.MODE_COPY_PACKET, msg.getMaxLength());
+
+			if (status >= 0) {
+				while (true) {
+					status = read(msg, 0);
+
+					if (status < 0) {
+						printError();
+						break;
+					}
+				}
+			} else
+				printError();
+		} finally {
+			buffer.setLength(0);
+			close();
+		}
+	}
+
+	@Override
+	protected void callback(NetfilterPacket packet) {
+		// TODO Auto-generated method stub
+		byte[] data = new byte[4096];
+		TCPPacket tcpPacket = new TCPPacket(1);
+		packet.getPacketData(data);
+
+		tcpPacket.setData(data);
+
+		
+		if (tcpPacket.getProtocol() == TCPPacket.PROTOCOL_TCP) {
+			//printTCPPacket(tcpPacket);
+			long sourceIp = tcpPacket.getSourceAsWord();
+			long sourcePort = tcpPacket.getSourcePort();
+			long destIp = tcpPacket.getDestinationAsWord();
+			long destPort = tcpPacket.getDestinationPort();
+//			long[] key = new long[] {sourceIp << 32 + sourcePort, destIp << 32 + destPort};
+//			if(tcpPacket.isSet(TCPPacket.MASK_SYN) && tcpPacket.isSet(TCPPacket.MASK_ACK)) {
+//				long sn = tcpPacket.getSequenceNumber();
+//				synchronized(queue){
+//					queue.put(key, sn);
+//				}
+//			}else if(tcpPacket.isSet(TCPPacket.MASK_ACK)) {
+//				synchronized(queue){
+//					queue.remove(key);
+//				}
+//			}else 
+			if(tcpPacket.isSet(TCPPacket.MASK_RST) && tcpPacket.getWindowSize() == 0) {
+				System.out.printf("drop: %s:%d, %s:%d, %d%n", IPUtil.longToString(sourceIp), sourcePort,
+						IPUtil.longToString(destIp), destPort, tcpPacket.getSequenceNumber());
+				reinject(packet, IPQHandle.VERDICT_DROP);
+				return;
+			}
+		}
+		reinject(packet, IPQHandle.VERDICT_ACCEPT);
+	}
+
+}
