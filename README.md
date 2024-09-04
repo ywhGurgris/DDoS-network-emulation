@@ -1,4 +1,4 @@
-### introduce
+### Introduction
 `server` directory: This is a Spring Boot-based application responsible for managing and configuring DDoS attacks. 
 It handles interaction with the MySQL database, manages attack configuration, and receives and parses network control instructions. 
 This part of the code ensures that the configuration and scheduling of attacks can be managed through the web interface.
